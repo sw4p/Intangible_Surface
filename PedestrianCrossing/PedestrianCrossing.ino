@@ -1,14 +1,23 @@
 #include <Wire.h>
+#include <ArduinoBLE.h>
 #include "paj7620.h"
 #include "rgb_lcd.h"
 
-/* LCD Object*/
+/* Objects */
 rgb_lcd lcd;
+// Pedestrian Crossing BLE Service
+BLEService pedestrianCrossing("19B10010-E8F2-537E-4F6C-D104768A1214");
+// Button characteristic.
+BLEBoolCharacteristic button("19B10011-E8F2-537E-4F6C-D104768A1214", BLERead | BLEWrite);
 
 /* Constants */
 static const int WAIT_DELAY = 5000;
 static const int WALK_TIME = 16;
 
+/* Variables */
+bool buttonLevel = false;
+
+/* LCD Custom Characters */
 byte walkPos1[8] = {
   0b01100,
   0b01100,
@@ -53,14 +62,17 @@ byte dangerSkull[8] = {
   0b10001,
 };
 
+/***************************************************************************************/
 void setup()
-{  
+{
+  // Initialize serial communication
   Serial.begin(9600);
-  delay(2000);
+  while (!Serial);
   Serial.println("DEBUG INFORMATION");
 
+  // Initialize gesture sensor
   uint8_t error = 0;
-  error = paj7620Init();      // initialize Paj7620 registers
+  error = paj7620Init();
   if (error)
   {
     Serial.print("Gesture Sensor Init ERROR, Code:");
@@ -70,16 +82,37 @@ void setup()
   {
     Serial.println("Gesture Sensor Init OK");
   }
-  
-  // set up the LCD's number of column and rows
+
+  // Initialize LCD
   lcd.begin(16, 2);
   // create custom characters
   lcd.createChar(1, walkPos1);
   lcd.createChar(2, walkPos2);
   lcd.createChar(3, stopHand);
   lcd.createChar(4, dangerSkull);
+
+  // Initialize BLE
+  if (!BLE.begin()) Serial.println("BLE Initialization Failed");
+  else
+  {
+    // Set local name for the device
+    BLE.setLocalName("PedestrianCrossing");
+    // Set advertisement service
+    BLE.setAdvertisedService(pedestrianCrossing);
+    // Add characteristic to the pedestrian service
+    pedestrianCrossing.addCharacteristic(button);
+    // Add service to the Device's service list
+    BLE.addService(pedestrianCrossing);
+    // Set initial value to the button
+    button.writeValue(buttonLevel);
+
+    // Start advertising
+    BLE.advertise();
+    Serial.println("BLE active, waiting for connection...");
+  }
 }
 
+/***************************************************************************************/
 void loop()
 {
   lcd.clear();
@@ -87,29 +120,20 @@ void loop()
   lcd.print("PEDESTRIANS");
   lcd.setCursor(1, 1);
   lcd.print("Wave and Wait");
-  
-  if (millis() % 60 == 0) Serial.println("Waiting for Gesture");
-  
-  if (identifyGesture())
+
+  if (identifyGesture() || BLEButtonActive())
   {
-    Serial.println("Gesture Recognised");
+    Serial.println("Button Active");
     /* Wait for the signal */
     lcd.setCursor(0, 1);
     lcd.print("Wait for Signal");
     delay(WAIT_DELAY);
     /* Received signal to WALK*/
-    //lcd.clear();
-    //lcd.setCursor(2, 0);
-    //lcd.print("PEDESTRIANS");
-    //lcd.setCursor(0, 0);
-    //lcd.print("WALK");
     for (int i = 0; i <= WALK_TIME; i++)
     {
       lcd.clear();
       lcd.setCursor(0, 0);
       lcd.print("WALK");
-      //lcd.setCursor(8, 0);
-      //lcd.print("  ");  ///< Clear the timer location
       lcd.setCursor(14, 0);
       lcd.print(WALK_TIME - i);
 
@@ -129,6 +153,7 @@ void loop()
   delay(1000);
 }
 
+/***************************************************************************************/
 bool identifyGesture()
 {
   uint8_t data = 0;
@@ -146,6 +171,22 @@ bool identifyGesture()
   {
     return true;
   }
+
+  return false;
+}
+
+/***************************************************************************************/
+bool BLEButtonActive()
+{
+  // Set initial value to button
+  button.writeValue(false);
+  // Poll for BLE events
+  BLE.poll();
+  // Read button value
+  buttonLevel = button.value();
+
+  // If button is set as TRUE via BLE return true
+  if (button.written() && buttonLevel) return true;
 
   return false;
 }
