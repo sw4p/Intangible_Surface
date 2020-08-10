@@ -1,18 +1,38 @@
+/*
+  Pedestrian Crossing
+
+  This code shows how to use gesture sensor and MQTT protocol to make
+  pedestrian crossing button touch-less.
+
+  The circuit:
+  Please refer https://www.hackster.io/usavswapnil/intangible-surface-dd262b
+  for circuit diagram.
+  
+  By Swapnil Verma
+  10/08/2020
+*/
+
 #include <Wire.h>
-#include <ArduinoBLE.h>
+#include <ArduinoMqttClient.h>
+#include <WiFiNINA.h>
 #include "paj7620.h"
 #include "rgb_lcd.h"
 
 /* Objects */
 rgb_lcd lcd;
-// Pedestrian Crossing BLE Service
-BLEService pedestrianCrossing("19B10010-E8F2-537E-4F6C-D104768A1214");
-// Button characteristic.
-BLEBoolCharacteristic button("19B10011-E8F2-537E-4F6C-D104768A1214", BLERead | BLEWrite);
+WiFiClient wifiClient;
+MqttClient mqttClient(wifiClient);
 
 /* Constants */
 static const int WAIT_DELAY = 5000;
 static const int WALK_TIME = 16;
+static const char MQTT_BROKER[] = ""; // Your MQTT broker's address
+static const int MQTT_PORT = 1883;
+static const char MQTT_TOPIC[] = "";  // Topic you want to subscribe/publish
+static const char WIFI_SSID[] = "";   // Your WiFi address
+static const char WIFI_PASSWORD[] = ""; // Your WiFi password
+static const char MQTT_USERNAME[] = ""; // MQTT broker's username if it has one
+static const char MQTT_PASSWORD[] = ""; // MQTT broker's password if it has one
 
 /* Variables */
 bool buttonLevel = false;
@@ -62,7 +82,13 @@ byte dangerSkull[8] = {
   0b10001,
 };
 
-/***************************************************************************************/
+/***************************************************************************************
+ * @brief Setup function will be called only once. Use this function to set-up your
+ *        device.
+ *        
+ * @param void
+ * @return void
+ **************************************************************************************/
 void setup()
 {
   // Initialize serial communication
@@ -91,28 +117,45 @@ void setup()
   lcd.createChar(3, stopHand);
   lcd.createChar(4, dangerSkull);
 
-  // Initialize BLE
-  if (!BLE.begin()) Serial.println("BLE Initialization Failed");
-  else
+  // Attempt to connect to Wifi network:
+  Serial.print("Attempting to connect to WPA SSID: ");
+  Serial.println(WIFI_SSID);
+  while (WiFi.begin(WIFI_SSID, WIFI_PASSWORD) != WL_CONNECTED)
   {
-    // Set local name for the device
-    BLE.setLocalName("PedestrianCrossing");
-    // Set advertisement service
-    BLE.setAdvertisedService(pedestrianCrossing);
-    // Add characteristic to the pedestrian service
-    pedestrianCrossing.addCharacteristic(button);
-    // Add service to the Device's service list
-    BLE.addService(pedestrianCrossing);
-    // Set initial value to the button
-    button.writeValue(buttonLevel);
-
-    // Start advertising
-    BLE.advertise();
-    Serial.println("BLE active, waiting for connection...");
+    // Failed, retry
+    Serial.print(".");
+    delay(5000);
   }
+  Serial.println("Connected to the network");
+
+  // Attempt to connect to MQTT broker
+  Serial.print("Attempting to connect to the MQTT broker: ");
+  mqttClient.setUsernamePassword(MQTT_USERNAME, MQTT_PASSWORD);
+  if (!mqttClient.connect(MQTT_BROKER, MQTT_PORT))
+  {
+    Serial.print("MQTT connection failed! Error code = ");
+    Serial.println(mqttClient.connectError());
+
+    while (1);
+  }
+  Serial.println("You're connected to the MQTT broker!");
+
+  // Set the message receive callback
+  mqttClient.onMessage(ReceiveMessage);
+  
+  // Subscribe to a topic
+  Serial.print("Subscribing to topic: ");
+  Serial.println(MQTT_TOPIC);
+  mqttClient.subscribe(MQTT_TOPIC);
 }
 
-/***************************************************************************************/
+/***************************************************************************************
+ * @brief This function will be called again and again and it will never exit.
+ *        It is essentially a while(1) loop. Place your state machine here.
+ *        
+ * @param void
+ * @return void
+ **************************************************************************************/
 void loop()
 {
   lcd.clear();
@@ -121,7 +164,9 @@ void loop()
   lcd.setCursor(1, 1);
   lcd.print("Wave and Wait");
 
-  if (identifyGesture() || BLEButtonActive())
+  mqttClient.poll();
+  
+  if (IdentifyGesture() || buttonLevel)
   {
     Serial.println("Button Active");
     /* Wait for the signal */
@@ -149,12 +194,19 @@ void loop()
       lcd.write(2);
       delay(500);
     }
+    buttonLevel = false;
+    SendMessage(false);
   }
   delay(1000);
 }
 
-/***************************************************************************************/
-bool identifyGesture()
+/***************************************************************************************
+ * @brief This function is responsible for identifying the gestures.
+ *        
+ * @param void
+ * @return true if any gesture is identified else false.
+ **************************************************************************************/
+bool IdentifyGesture()
 {
   uint8_t data = 0;
   uint8_t error = paj7620ReadReg(0x43, 1, &data);       // Read Bank_0_Reg_0x43/0x44 for gesture result.
@@ -169,24 +221,34 @@ bool identifyGesture()
        (data == GES_CLOCKWISE_FLAG) ||
        (data == GES_COUNT_CLOCKWISE_FLAG) )
   {
+    SendMessage(true);
     return true;
   }
 
   return false;
 }
 
-/***************************************************************************************/
-bool BLEButtonActive()
+/***************************************************************************************
+ * @brief It is a callback function if any message is received via MQTT broker.
+ *        
+ * @param messageSize[in] Size of the message
+ * @return void
+ **************************************************************************************/
+void ReceiveMessage(int messageSize)
 {
-  // Set initial value to button
-  button.writeValue(false);
-  // Poll for BLE events
-  BLE.poll();
-  // Read button value
-  buttonLevel = button.value();
+  if ((char)mqttClient.read() == '1') buttonLevel = true;
+  else buttonLevel = false;
+}
 
-  // If button is set as TRUE via BLE return true
-  if (button.written() && buttonLevel) return true;
-
-  return false;
+/***************************************************************************************
+ * @brief This function is responsible for publishing message to a topic.
+ *        
+ * @param message[in] message in boolean datatype
+ * @return void
+ **************************************************************************************/
+void SendMessage(bool message)
+{
+  mqttClient.beginMessage(MQTT_TOPIC);
+  mqttClient.print(message);
+  mqttClient.endMessage();
 }
